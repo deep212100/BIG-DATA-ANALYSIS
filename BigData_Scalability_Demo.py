@@ -1,0 +1,68 @@
+
+
+import os
+import time
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from contextlib import contextmanager
+
+@contextmanager
+def time_block(name):
+    t0 = time.time()
+    yield
+    print(f"[{name}] elapsed: {time.time() - t0:.2f}s")
+
+def generate_synthetic_df(n_rows:int, seed:int=42):
+    rng = np.random.RandomState(seed)
+    return pd.DataFrame({
+        'user_id': rng.randint(0, n_rows//10, size=n_rows),
+        'event_type': rng.choice(["click","view","purchase","add_to_cart"], size=n_rows),
+        'value': rng.exponential(scale=50.0, size=n_rows),
+        'timestamp': pd.to_datetime(rng.randint(1609459200, 1672531199, size=n_rows), unit='s'),
+        'product_id': rng.randint(0, n_rows//20, size=n_rows),
+    })
+
+def dask_demo(n_rows=200000, npartitions=40, tmpdir='dask_temp'):
+    import dask.dataframe as dd
+    from dask.distributed import Client, LocalCluster
+    Path(tmpdir).mkdir(parents=True, exist_ok=True)
+
+    cluster = LocalCluster(n_workers=4, threads_per_worker=1, memory_limit='2GB')
+    client = Client(cluster)
+
+    pdf = generate_synthetic_df(n_rows)
+    ddf = dd.from_pandas(pdf, npartitions=npartitions)
+
+    parquet_path = os.path.join(tmpdir, 'events_parquet')
+    ddf.to_parquet(parquet_path, engine='pyarrow', write_index=False, overwrite=True)
+
+    ddf2 = dd.read_parquet(parquet_path, engine='pyarrow')
+    agg = ddf2.groupby('event_type').value.agg(['sum','mean','count']).compute()
+    print(agg)
+
+    client.close()
+    cluster.close()
+
+def pyspark_demo(n_rows=200000, tmpdir='spark_temp'):
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import sum as spark_sum, avg as spark_avg, count as spark_count
+
+    spark = SparkSession.builder.master('local[4]').appName('BigDataDemo').getOrCreate()
+    pdf = generate_synthetic_df(n_rows)
+    sdf = spark.createDataFrame(pdf)
+
+    parquet_path = os.path.join(tmpdir, 'events_parquet')
+    sdf.write.mode('overwrite').parquet(parquet_path)
+
+    sdf2 = spark.read.parquet(parquet_path)
+    agg = sdf2.groupBy('event_type').agg(
+        spark_sum('value'), spark_avg('value'), spark_count('*')
+    )
+    agg.show()
+
+    spark.stop()
+
+if __name__ == "__main__":
+    dask_demo(200000)
+    pyspark_demo(200000)
